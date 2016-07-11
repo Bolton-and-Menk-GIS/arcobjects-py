@@ -165,6 +165,44 @@ def CLSID(MyClass):
     """
     return str(MyClass._reg_clsid_)
 
+def GetMxDoc(pMxDoc):
+    """Get an IMapDocument pointer from variety of inputs
+
+    pMxDoc -- can be one of the following types:
+        str -- full path to unopened mxd on disk or "current" to reference current
+            open mxd
+        IApplication -- esriFramework.IApplication pointer to current open application
+
+
+    """
+    import comtypes.gen.esriDisplay as esriDisplay
+    import comtypes.gen.esriArcMapUI as esriArcMapUI
+    import comtypes.gen.esriCarto as esriCarto
+    import comtypes.gen.esriFramework as esriFramework
+
+    # validate/get proper map document instance
+    if isinstance(pMxDoc, esriFramework.IApplication):
+        pDoc = pApp.Document
+        pMxDoc = CType(pDoc, esriArcMapUI.IMxDocument)
+
+     # pMap validation
+    if isinstance(pMxDoc, esriCarto.IMapDocument):
+        pass
+
+    # it is either the current map open or mxd on disc
+    elif isinstance(pMxDoc, basestring):
+        if pMxDoc.lower() == 'current':
+            pApp = GetCurrentApp()
+            pDoc = pApp.Document
+            pMxDoc = CType(pDoc, esriArcMapUI.IMxDocument)
+
+        elif os.path.exists(pMxDoc):
+            mapDoc = pMxDoc
+            InitStandalone()
+            pMxDoc = NewObj(esriCarto.MapDocument, esriCarto.IMapDocument)
+            pMxDoc.Open(mapDoc)
+
+    return pMxDoc
 
 #********* Stand alone ****
 
@@ -192,6 +230,7 @@ def InitStandalone():
         return (licenseStatus == esriSystem.esriLicenseCheckedOut)
     return False
 
+
 def check_extension(ext_code):
     """Determines whether or not an extension is checked out, returns True or False
 
@@ -217,6 +256,7 @@ def check_extension(ext_code):
 
 def mxd_version(mxd):
     """return mxd version information as tuple"""
+    InitStandalone()
     getModule('esriCarto')
     import comtypes.gen.esriCarto as esriCarto
     pMapDoc = NewObj(esriCarto.MapDocument, esriCarto.IMapDocument)
@@ -246,6 +286,7 @@ def create_mxd(mapDoc):
 
     mapDoc -- path to new mxd
     """
+    InitStandalone()
     getModule('esriCarto.olb')
     import comtypes.gen.esriCarto as esriCarto
     mxd = NewObj(esriCarto.MapDocument, esriCarto.IMapDocument)
@@ -253,14 +294,7 @@ def create_mxd(mapDoc):
     mxd.Close()
     return mapDoc
 
-def ref_mxd(mxd_path):
-    import comtypes.gen.esriArcMapUI as esriArcMapUI
-    import comtypes.gen.esriCarto as esriCarto
-
-    # create mapDoc
-    return NewObj(esriCarto.MapDocument, esriCarto.IMapDocument).Open(mxd_path)
-
-def Standalone_OpenSDE(server, instance, user=os.environ['USERNAME'], mode='OSA', version='SDE.DEFAULT'):
+def Standalone_OpenSDE(server, instance, database=None, mode='OSA', version=None):
     """open SDE database
 
     instance example: "sde:oracle10g:/;LOCAL=PRODUCTION_TUCSON"
@@ -272,11 +306,15 @@ def Standalone_OpenSDE(server, instance, user=os.environ['USERNAME'], mode='OSA'
     import comtypes.gen.esriDataSourcesGDB as esriDataSourcesGDB
 
     pPropSet = NewObj(esriSystem.PropertySet, esriSystem.IPropertySet)
-    pPropSet.SetProperty("SERVER", server)
-    pPropSet.SetProperty("USER", user)
-    pPropSet.SetProperty("INSTANCE", instance)
-    pPropSet.SetProperty("AUTHENTICATION_MODE", mode)
-    pPropSet.SetProperty("VERSION", version)
+    props = {'SERVER': server,
+             'INSTANCE': instance,
+             'AUTHENTICATION_MODE': mode,
+             'DATABASE': database,
+             'VERSION': version}
+
+    for prop, val in props.iteritems():
+        if val:
+            pPropSet.SetProperty(prop, val)
     pWSF = NewObj(esriDataSourcesGDB.SdeWorkspaceFactory, \
                   esriGeoDatabase.IWorkspaceFactory)
     pWS = pWSF.Open(pPropSet, 0)
@@ -382,6 +420,31 @@ def SearchCursor(fc, fields):
     for i in xrange(count):
         row = cur.NextFeature()
         yield tuple(row.Value(fi) for fi in indices)
+
+def unregisterReplica(ws, replicaName=None, replicaID=None, replicaGUID=None):
+    """Unregisters a replica from a database
+
+    Required:
+        ws -- Pointer to IWorkspace Interface
+    Optional (need to use one of these):
+        replicaName -- name of replica to unregister
+        replicaID -- id of replica
+        replicaGUID -- Guid of replica
+    """
+    wsReplicasAdmin = CType(ws, esriGeoDatabase.IWorkspaceReplicasAdmin2)
+    wsReps = CType(ws, esriGeoDatabase.IWorkspaceReplicas)
+    replica = None
+    if replicaName:
+        replica = wsReps.ReplicaByName(replicaName)
+    elif replicaID:
+        replica = wsReps.ReplicaByID(replicaID)
+    elif replicaGUID:
+        replica = wsReps.ReplicaByGuid(replicaGUID)
+
+    if isinstance(replica, esriGeoDatabase.IReplica):
+        rep_name = replica.Name
+        wsReplicasAdmin.UnregisterReplica(replica, True)
+        print 'Successfully unregistered: "{}"'.format(rep_name)
 
 def getUnitSize(my_size, rounding=1):
     """will return a size in bytes to human readable format"""
@@ -585,20 +648,243 @@ def ArcCatalog_GetSelectedTable(bStandalone=False):
     print "Selected table: " + pDS.Name
 
 # **** custom helper functions ****
+def getLayer(pApp, layer_name):
+    """ get a layer by name"""
+    pApp = GetMxDoc(pApp)
+    for lyr in iterLayers(pApp):
+        if lyr.Name == layer_name:
+            return lyr
 
-def iterLayers(pApp=None):
+
+def iterLayers(pApp=None, filterer=[], iterGroups=True):
     """creates a generator for layers"""
     from comtypes.gen import esriArcMapUI, esriCarto
-    if not pApp:
-        pApp = GetApp()
-    pDoc = pApp.Document
-    pMxDoc = CType(pDoc, esriArcMapUI.IMxDocument)
-    pMap = pMxDoc.FocusMap
-    pAV = CType(pMap, esriCarto.IActiveView)
 
-    # reference layer
+    # nested func
+    def getSubLayers(obj, filterer, iterGroups):
+        """returns a layer at an index from a group layer or map"""
+        if isinstance(obj, esriCarto.IMap):
+            attr = 'LayerCount'
+        elif isinstance(obj, esriCarto.ICompositeLayer):
+            attr = 'Count'
+
+        for i in range(getattr(obj, attr)):
+            layer = obj.Layer(i)
+            gl = CType(layer, esriCarto.IGroupLayer)
+            if iterGroups and isinstance(gl, esriCarto.IGroupLayer):
+                cl = CType(gl, esriCarto.ICompositeLayer)
+
+                # iter sub layers
+                for lyr in getSubLayers(cl, filterer, True):
+                    if len(filterer) and lyr.Name in filterer:
+                        yield lyr
+
+                    elif not filterer:
+                        yield lyr
+
+            else:
+                # its just a layer
+                if len(filterer) and layer.Name in filterer:
+                    yield layer
+
+                elif not filterer:
+                    yield layer
+
+    pApp = GetMxDoc(pApp)
+    if isinstance(pApp, esriArcMapUI.IMxDocument):
+        pMxDoc = pApp
+
+    else:
+        if not pApp:
+            pApp = GetApp()
+        pDoc = pApp.Document
+        pMxDoc = CType(pDoc, esriArcMapUI.IMxDocument)
+
+    if isinstance(pMxDoc, esriArcMapUI.IMxDocument):
+        pMap = pMxDoc.FocusMap
+
+        # reference layer
+        return getSubLayers(pMap, filterer, iterGroups)
+
+def clearReferenceScale(layer):
+    """clears a refernce scale for a layer"""
+    from comtypes.gen import esriArcMapUI, esriCarto
+    if isinstance(layer, esriCarto.ILayer):
+        layer = CType(layer, esriCarto.IGeoFeatureLayer)
+
+    if isinstance(layer, esriCarto.IGeoFeatureLayer):
+        layer.ScaleSymbols = False
+    else:
+        raise ValueError('{} is not an esriCarto.ILayer or esriCarto.IGeoFeatureLayer!'.format(layer.__class__.__name__))
+
+def importSymbologyFromLayer(pMxDoc, target_layer, target_field, symbol_layer, normalization_field=None, minVal=None, maxVal=None):
+    """imports the symbology from a layer in TOC
+
+    Required:
+        pApp -- reference to current app
+        target_layer -- layer to symbolize
+        target_field -- name of target field to symbolize
+        symbol_layer -- symbology layer
+
+    Optional:
+        normalization_field -- field to normalize by
+        minVal -- minimum value for classification, only used for Proportional Symbols
+        maxVal -- maximum value for classification, only used for Proportional Symbols
+    """
+    import comtypes.gen.esriDisplay as esriDisplay
+    import comtypes.gen.esriArcMapUI as esriArcMapUI
+    import comtypes.gen.esriCarto as esriCarto
+    import comtypes.gen.esriFramework as esriFramework
+    import comtypes.gen.esriGeoDatabase as esriGeoDatabase
+
+    # validate/get proper map document instance
+    pMxDoc = GetMxDoc(pMxDoc)
+
+    # get IMapPointer
+    pMap = pMxDoc.FocusMap
+
+    # get layer references
+    targ_lyr = [pMap.Layer(i) for i in range(pMap.LayerCount) if pMap.Layer(i).Name == target_layer][0]
+    symb_lyr = [pMap.Layer(i) for i in range(pMap.LayerCount) if pMap.Layer(i).Name == symbol_layer][0]
+
+    # cast to IGeoFeatureLayer interface and get renderers
+    targGeo = CType(targ_lyr, esriCarto.IGeoFeatureLayer)
+    symbGeo = CType(symb_lyr, esriCarto.IGeoFeatureLayer)
+    symbRenderer = symbGeo.Renderer
+
+    #**********************************************************************************
+    #
+    # ClassBreaksRenderer
+    symbClassBreaks = CType(symbRenderer, esriCarto.IClassBreaksRenderer)
+    symbUnique = CType(symbRenderer, esriCarto.IUniqueValueRenderer)
+    symbProp = CType(symbRenderer, esriCarto.IProportionalSymbolRenderer)
+
+    if isinstance(symbClassBreaks, esriCarto.IClassBreaksRenderer):
+
+        # cast to IClassBreaksRenderer
+        targSymb = NewObj(esriCarto.ClassBreaksRenderer, esriCarto.IClassBreaksRenderer)
+
+        # set target symbology field
+        targSymb.Field = target_field
+        targSymb.NormField = normalization_field
+        targSymb.BreakCount = symbClassBreaks.BreakCount
+
+        # iterate through class beraks from symbol layer and apply to target
+        for i in range(symbClassBreaks.BreakCount):
+            targSymb.Break[i] = symbClassBreaks.Break[i]
+            targSymb.Description[i] = symbClassBreaks.Description[i]
+            targSymb.Symbol[i] = symbClassBreaks.Symbol[i]
+            targSymb.Label[i] = symbClassBreaks.Label[i]
+
+    # ***********************************************************************************
+    #
+    # UniqueValuesRenderer
+    elif isinstance(symbUnique, esriCarto.IUniqueValueRenderer):
+        targSymb = NewObj(esriCarto.UniqueValueRenderer, esriCarto.IUniqueValueRenderer)
+
+        # add all values from symbol layer
+        targGeo.Field = target_field
+
+        for i in range(symbUnique.ValueCount):
+            targSymb.AddValue(symbUnique.Value[i], symbUnique.Heading(symbUnique.Value[i]), symbUnique.Symbol(symbUnique.Value[i]))
+
+    # ***********************************************************************************
+    #
+    # ProportionalSymbolRenderer
+    elif isinstance(symbProp, esriCarto.IProportionalSymbolRenderer):
+        targSymb = NewObj(esriCarto.ProportionalSymbolRenderer, esriCarto.IProportionalSymbolRenderer)
+        targSymb.Field = target_field
+        targSymb.NormField = normalization_field
+
+        # set min and max symbols
+        for attr in ('FlanneryCompensation', 'MinDataValue', 'MaxDataValue', 'BackGroundSymbol',
+                     'MinSymbol', 'ValueUnit', 'ValueRepresentation', 'LegendSymbolCount'):
+            if hasattr(symbProp, attr):
+                setattr(targSymb, attr, getattr(symbProp, attr))
+
+        targSymb.MinDataValue = minVal
+        targSymb.MaxDataValue = maxVal
+
+        # create legend symbolss
+        targSymb.CreateLegendSymbols()
+
+    targGeo.Renderer = targSymb
+    pMxDoc.ActiveView.Refresh()
+    pMxDoc.UpdateContents()
+    return targSymb
+
+def setSymbolSize(pMapDocument, layer_names=[], pointSize=12, lineWidth=1, autoSave=True, do_all=False, clearRefScale=True):
+    """sets the size/width of simple esri Marker or Line symbols
+
+    Required:
+        pMapDocument -- IMapDocument pointer (esriCarto) or string map document path
+
+    Optional:
+        layer_names -- list of layer names to set size of as they appear in TOC.
+        pointSize -- size for all point layers specified.  Default is 12
+        lineWidth -- width for all line layers specified.  Default is 1
+        autoSave -- option to save document automatically after making changes.
+            Default is True.
+        do_all -- option to do all point/line layers in map.  Default is False.
+    """
+    import comtypes.gen.esriDisplay as esriDisplay
+    import comtypes.gen.esriArcMapUI as esriArcMapUI
+    import comtypes.gen.esriCarto as esriCarto
+
+    # pMap validation
+    if isinstance(pMapDocument, esriCarto.IMapDocument):
+        pass
+    elif isinstance(pMapDocument, basestring):
+        InitStandalone()
+        mapDoc = pMapDocument
+        pMapDocument = NewObj(esriCarto.MapDocument, esriCarto.IMapDocument)
+        pMapDocument.Open(mapDoc)
+
+    # get IMap pointer
+    pMap = pMapDocument.Map(0)
+
+    if isinstance(layer_names, (basestring)):
+        layer_names = [layer_names]
+
+    # defaults for point (shapeType 1) is 12, default for line (shapeType 3) is 2
+    defaultSymbol = {1: esriDisplay.IMarkerSymbol,
+                     3: esriDisplay.ILineSymbol}
+
+    # iterate through layer list
     for i in range(pMap.LayerCount):
-        yield pMap.Layer(i)
+
+        lyr = pMap.Layer(i)
+        if lyr.Name in layer_names or do_all in (True, 1):
+
+            # cast to esriCarto.IGeoFeatureLayer to get renderer
+            flyr = CType(lyr, esriCarto.IFeatureLayer2)
+            iGeo = CType(lyr, esriCarto.IGeoFeatureLayer)
+            if clearRefScale:
+                iGeo.ScaleSymbols = False
+            renderer = iGeo.Renderer
+
+            # cast to simple renderer and then to simple symbol
+            simpleRenderer = CType(renderer, esriCarto.ISimpleRenderer)
+            if isinstance(simpleRenderer, esriCarto.ISimpleRenderer):
+                simple = simpleRenderer.Symbol
+
+                # cast to marker symbol interface and set size or width
+                if flyr.ShapeType in (1,3):
+                    marker = CType(simple, defaultSymbol[flyr.ShapeType])
+                    if flyr.ShapeType == 1 and pointSize is not None:
+                        marker.Size = pointSize
+                    elif flyr.ShapeType == 3 and lineWidth is not None:
+                        marker.Width = lineWidth
+
+    # refresh Map
+    pMapDocument.ActiveView.Refresh()
+
+    # save and close map
+    if autoSave in (True, 1):
+        pMapDocument.Save()
+    pMapDocument.Close()
+    del pMap, pMapDocument
+    return
 
 def alter_alias(fc, f_dict):
     """Change field names at the database level
