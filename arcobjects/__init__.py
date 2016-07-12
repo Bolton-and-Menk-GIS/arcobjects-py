@@ -440,11 +440,18 @@ def unregisterReplica(ws, replicaName=None, replicaID=None, replicaGUID=None):
         replica = wsReps.ReplicaByID(replicaID)
     elif replicaGUID:
         replica = wsReps.ReplicaByGuid(replicaGUID)
+    else:
+        print 'Not a valid name, ID, or Guid for replica!'
+        return False
 
     if isinstance(replica, esriGeoDatabase.IReplica):
         rep_name = replica.Name
         wsReplicasAdmin.UnregisterReplica(replica, True)
         print 'Successfully unregistered: "{}"'.format(rep_name)
+        return True
+    else:
+        print 'Could not find replica!'
+        return False
 
 def getUnitSize(my_size, rounding=1):
     """will return a size in bytes to human readable format"""
